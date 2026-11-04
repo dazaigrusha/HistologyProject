@@ -1,6 +1,7 @@
 """Читання параметрів без зміни програмного коду."""
 import json
 from pathlib import Path
+from histology.stains import validate_stains
 
 
 def load_config(path: Path) -> dict:
@@ -12,4 +13,5 @@ def load_config(path: Path) -> dict:
         value = config.get(name)
         if type(value) is not int or value <= 0:
             raise ValueError(f'{name}: потрібне додатне ціле число.')
+    validate_stains(config.get("stains"))
     return config

@@ -1,5 +1,19 @@
 {
   "preview_width": 980,
   "preview_height": 540,
-  "max_pixels": 25000000
+  "max_pixels": 25000000,
+  "stains": {
+    "hematoxylin": [
+      0.65,
+      0.7,
+      0.29
+    ],
+    "eosin": [
+      0.07,
+      0.99,
+      0.11
+    ],
+    "white_level": 255,
+    "block_rows": 128
+  }
 }
