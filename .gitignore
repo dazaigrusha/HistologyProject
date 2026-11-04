@@ -4,3 +4,9 @@ __pycache__/
 results/
 data/images/*
 !data/images/.gitkeep
+data/references/*
+!data/references/.gitkeep
+
+# Локальні набори та похідні експерименти
+data/raw/
+data/prepared/
