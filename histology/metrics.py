@@ -17,7 +17,7 @@ def binary_metrics(predicted: np.ndarray, reference: np.ndarray) -> dict:
     if (predicted.dtype != np.bool_ or reference.dtype != np.bool_
             or predicted.ndim != 2 or predicted.shape != reference.shape or predicted.size == 0):
         raise ValueError(f'Розміри масок повинні збігатися: результат {predicted.shape}, '
-                         f'еталон {reference.shape}. Еталон автоматично не масштабується.')
+                         f'еталон {reference.shape}. Перевір етап узгодження еталона.')
     tp = int(np.count_nonzero(predicted & reference))
     fp = int(np.count_nonzero(predicted & ~reference))
     fn = int(np.count_nonzero(~predicted & reference))
@@ -82,18 +82,62 @@ def read_reference(path: Path, max_pixels: int) -> tuple:
     return gray >= 128, None
 
 
+def prepare_reference(path: Path, max_pixels: int, target_shape: tuple) -> tuple:
+    """Прочитати еталон і узгодити PNG-маску з розміром результату.
+
+    Поріг застосовується до інтенсивнісної маски ДО масштабування.
+    Метод найближчого сусіда: floor((dst_index+.5)*src_size/dst_size).
+    Припускаємо те саме поле зору; aspect ratio може різнитися не більш
+    ніж на 1% через округлення. NPY автоматично не масштабується.
+    """
+    truth, count = read_reference(path, max_pixels)
+    if (len(target_shape) != 2 or min(target_shape) <= 0
+            or target_shape[0] * target_shape[1] > max_pixels):
+        raise ValueError('Некоректний або надто великий розмір результату.')
+    original_shape = tuple(truth.shape)
+    resized = original_shape != tuple(target_shape)
+    if resized:
+        if path.suffix.lower() == '.npy':
+            raise ValueError(f'NPY-еталон {original_shape} має відповідати результату {target_shape}. '
+                             'Автоматичне масштабування instance-ID вимкнено.')
+        source_height, source_width = original_shape
+        target_height, target_width = target_shape
+        source_ratio = source_width / source_height
+        target_ratio = target_width / target_height
+        if abs(source_ratio - target_ratio) / source_ratio > .01:
+            raise ValueError(f'Різні пропорції кадру й еталона: {original_shape} → {target_shape}. '
+                             'Автоматичне розтягування заблоковане; перевір кадрування.')
+        y = np.minimum(source_height - 1,
+            np.floor((np.arange(target_height) + .5) * source_height / target_height).astype(int))
+        x = np.minimum(source_width - 1,
+            np.floor((np.arange(target_width) + .5) * source_width / target_width).astype(int))
+        truth = truth[y[:, None], x[None, :]]
+    alignment = {'resized': resized, 'original_shape_hw': list(original_shape),
+                 'evaluated_shape_hw': list(target_shape), 'method': 'nearest' if resized else 'none',
+                 'same_field_of_view_assumed': resized,
+                 'note': 'Resizing matches resolution only; it cannot recover annotation detail or correct cropping.'}
+    return truth, count, alignment
+
+
+def alignment_fields(alignment: dict) -> dict:
+    """Плоскі поля для CSV, щоб масштабування не приховувалося в таблицях."""
+    height, width = alignment['original_shape_hw']
+    return {'reference_resized': alignment['resized'],
+            'reference_original_height': height, 'reference_original_width': width}
+
+
 def evaluate_result(result: dict, reference_path: Path, max_pixels: int) -> dict:
     """Порівняти поточні мітки й, за наявності, мітки до Watershed."""
-    truth, reference_count = read_reference(reference_path, max_pixels)
+    truth, reference_count, alignment = prepare_reference(reference_path, max_pixels, result['labels'].shape)
     variants = {'current': result['labels']}
     if 'before_labels' in result:
         variants = {'before_watershed': result['before_labels'], 'after_watershed': result['labels']}
     rows = []
     for stage, labels in variants.items():
         count = int(np.unique(labels[labels > 0]).size)
-        rows.append({'stage': stage, **binary_metrics(labels > 0, truth),
+        rows.append({'stage': stage, **alignment_fields(alignment), **binary_metrics(labels > 0, truth),
                      **count_metrics(count, reference_count)})
-    return {'reference': str(reference_path), 'rows': rows,
+    return {'reference': str(reference_path), 'rows': rows, 'reference_alignment': alignment,
             'reference_processing': ('NPY: bool or instance IDs' if reference_path.suffix.lower() == '.npy'
                                      else 'Grayscale mask >=128; exact 0/1 masks use >0'),
             'note': 'Pixel overlap and count error; no instance matching or instance F1.'}

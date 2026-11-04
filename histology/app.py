@@ -286,7 +286,14 @@ class Application(tk.Tk):
                 self.result['evaluation'] = result
                 current = result['rows'][-1]
                 self.metric_text.set(f"Dice: {current['dice']:.3f} | IoU: {current['iou']:.3f}")
-                self.info.set('Порівняння готове. Збережи результати для CSV/JSON метрик.')
+                alignment = result['reference_alignment']
+                if alignment['resized']:
+                    source_h, source_w = alignment['original_shape_hw']
+                    target_h, target_w = alignment['evaluated_shape_hw']
+                    self.info.set(f'Еталон {source_w}×{source_h} → {target_w}×{target_h}: найближчий сусід. '
+                                  'Перевір, що це те саме поле зору. Збережи результати для метрик.')
+                else:
+                    self.info.set('Порівняння готове. Збережи результати для CSV/JSON метрик.')
             elif self.job == 'batch':
                 self.info.set(f'Пакетну обробку завершено: {result}. Перевір batch_status.csv.')
             elif self.job == 'texture':
