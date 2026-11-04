@@ -2,6 +2,7 @@
 import math
 from pathlib import Path
 import numpy as np
+from PIL import Image
 from histology.image_io import load_image
 
 
@@ -15,7 +16,8 @@ def binary_metrics(predicted: np.ndarray, reference: np.ndarray) -> dict:
     """
     if (predicted.dtype != np.bool_ or reference.dtype != np.bool_
             or predicted.ndim != 2 or predicted.shape != reference.shape or predicted.size == 0):
-        raise ValueError('Метрики очікують дві непорожні bool-маски однакового розміру.')
+        raise ValueError(f'Розміри масок повинні збігатися: результат {predicted.shape}, '
+                         f'еталон {reference.shape}. Еталон автоматично не масштабується.')
     tp = int(np.count_nonzero(predicted & reference))
     fp = int(np.count_nonzero(predicted & ~reference))
     fn = int(np.count_nonzero(~predicted & reference))
@@ -47,7 +49,7 @@ def count_metrics(predicted: int, reference: int | None) -> dict:
 
 
 def read_reference(path: Path, max_pixels: int) -> tuple:
-    """PNG/BMP/TIFF: строго бінарна маска; NPY: bool-маска або instance-ID.
+    """Зображення: маска інтенсивності; NPY: bool-маска або instance-ID.
 
     У цілочисловому NPY кожне додатне значення — один розмічений об’єкт,
     нуль — фон. PNG не дає істинної кількості ядер при їхньому дотику.
@@ -63,12 +65,21 @@ def read_reference(path: Path, max_pixels: int) -> tuple:
             raise ValueError('Еталон NPY: bool або невід’ємні цілочислові ID.')
         count = int(np.unique(labels[labels > 0]).size)
         return np.asarray(labels > 0), count
+    # Не конвертуємо 16/32-бітні ID-маски через RGB: це знищило б ID.
+    with Image.open(path) as image:
+        if image.mode in ('I', 'F') or image.mode.startswith('I;16'):
+            raise ValueError('Високобітну ID-маску збережи як цілочисловий NPY без RGB-конвертації.')
     rgb = np.asarray(load_image(path, max_pixels))
-    values = np.unique(rgb)
-    if not np.all(rgb == rgb[..., :1]) or not (np.all(np.isin(values, [0, 1]))
-                                              or np.all(np.isin(values, [0, 255]))):
-        raise ValueError('Еталон-зображення має бути бінарним 0/1 або 0/255 без JPEG-артефактів.')
-    return rgb[..., 0] > 0, None
+    if not np.all(rgb == rgb[..., :1]):
+        raise ValueError('Еталон має бути у відтінках сірого. Кольорові ID-маски потребують окремого перетворення.')
+    gray = rgb[..., 0]
+    values = np.unique(gray)
+    # Справжню 0/1 маску зберігаємо без порога 128.
+    if np.all(np.isin(values, [0, 1])):
+        return gray > 0, None
+    # Інтенсивнісна PNG-маска може містити сірі краї після масштабування.
+    # ID із 8-бітного PNG не вгадуємо: для них потрібен явний instance-NPY.
+    return gray >= 128, None
 
 
 def evaluate_result(result: dict, reference_path: Path, max_pixels: int) -> dict:
@@ -83,4 +94,6 @@ def evaluate_result(result: dict, reference_path: Path, max_pixels: int) -> dict
         rows.append({'stage': stage, **binary_metrics(labels > 0, truth),
                      **count_metrics(count, reference_count)})
     return {'reference': str(reference_path), 'rows': rows,
+            'reference_processing': ('NPY: bool or instance IDs' if reference_path.suffix.lower() == '.npy'
+                                     else 'Grayscale mask >=128; exact 0/1 masks use >0'),
             'note': 'Pixel overlap and count error; no instance matching or instance F1.'}

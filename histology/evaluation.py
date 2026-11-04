@@ -50,6 +50,8 @@ def evaluate_run(directory: Path, reference_path: Path, max_pixels: int) -> dict
             'count_absolute_error': None, 'count_relative_error': None}
         rows.append({'stage': stage, **binary_metrics(predicted, truth), **counts})
     evaluation = {'reference': str(reference_path), 'rows': rows,
+                  'reference_processing': ('NPY: bool or instance IDs' if reference_path.suffix.lower() == '.npy'
+                                           else 'Grayscale mask >=128; exact 0/1 masks use >0'),
                   'note': 'Raw/opened stages have pixel metrics only; SSIM is global on binary masks.'}
     write_evaluation(directory, evaluation)
     return evaluation
