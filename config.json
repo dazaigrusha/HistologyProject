@@ -23,5 +23,13 @@
     "max_area": 0,
     "connectivity": 8,
     "exclude_border": false
+  },
+  "watershed": {
+    "min_peak_distance": 8.0,
+    "min_peak_height": 2.0,
+    "relative_peak_height": 0.35
+  },
+  "measurements": {
+    "pixel_size_um": null
   }
 }

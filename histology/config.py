@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 from histology.stains import validate_stains
 from histology.segmentation import validate_segmentation
+from histology.watershed import validate_watershed
+from histology.measurements import validate_measurements
 
 
 def load_config(path: Path) -> dict:
@@ -16,4 +18,6 @@ def load_config(path: Path) -> dict:
             raise ValueError(f'{name}: потрібне додатне ціле число.')
     validate_stains(config.get("stains"))
     validate_segmentation(config.get("segmentation"))
+    validate_watershed(config.get("watershed"))
+    validate_measurements(config.get("measurements"))
     return config

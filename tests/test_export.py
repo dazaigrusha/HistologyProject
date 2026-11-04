@@ -49,6 +49,34 @@ class ExportTests(unittest.TestCase):
             for row in rows:
                 self.assertEqual(int(row['area_px']), int(np.sum(labels == int(row['id']))))
 
+    def test_watershed_workflow_exports_before_and_after(self):
+        from histology.app import analyze_image, split_image
+        config = load_config(Path(__file__).resolve().parents[1] / 'config.json')
+        config['segmentation'].update(opening_radius=0, min_area=1)
+        yy, xx = np.indices((29, 39))
+        mask = ((yy - 14) ** 2 + (xx - 13) ** 2 <= 64) | ((yy - 14) ** 2 + (xx - 25) ** 2 <= 64)
+        h_map = mask.astype(np.float32) * 2
+        rgb = np.full((29, 39, 3), 255, dtype=np.uint8)
+        before = analyze_image(rgb, h_map, config['segmentation'], config['measurements'])
+        after = split_image(rgb, before, config)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = save_results(Path(tmp), 'touching.png', (39, 29), (h_map, h_map), config, after)
+            summary = json.loads((folder / 'summary.json').read_text(encoding='utf-8'))
+            self.assertEqual(summary['before']['candidate_count'], 1)
+            self.assertEqual(summary['after']['candidate_count'], 2)
+            self.assertEqual(summary['markers'], 2)
+            with (folder / 'objects.csv').open(encoding='utf-8-sig', newline='') as stream:
+                objects = list(csv.DictReader(stream))
+            self.assertEqual(len(objects), 2)
+            labels = np.load(folder / 'labels.npy', allow_pickle=False)
+            for item in objects:
+                self.assertEqual(int(item['area_px']), int(np.sum(labels == int(item['id']))))
+                self.assertGreater(float(item['perimeter_px']), 0)
+                self.assertEqual(item['area_um2'], '')
+            for filename in ('before_labels.npy', 'markers.npy', 'distance.npy',
+                             'watershed_labels.npy', 'objects_before.csv', 'before_overlay.png'):
+                self.assertTrue((folder / filename).is_file())
+
 
 if __name__ == '__main__':
     unittest.main()
