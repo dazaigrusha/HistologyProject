@@ -5,6 +5,7 @@ from histology.stains import validate_stains
 from histology.segmentation import validate_segmentation
 from histology.watershed import validate_watershed
 from histology.measurements import validate_measurements
+from histology.texture import validate_texture
 
 
 def load_config(path: Path) -> dict:
@@ -20,4 +21,5 @@ def load_config(path: Path) -> dict:
     validate_segmentation(config.get("segmentation"))
     validate_watershed(config.get("watershed"))
     validate_measurements(config.get("measurements"))
+    validate_texture(config.get("texture"))
     return config

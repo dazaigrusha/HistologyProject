@@ -31,5 +31,9 @@
   },
   "measurements": {
     "pixel_size_um": null
+  },
+  "texture": {
+    "source": "hematoxylin",
+    "scope": "whole"
   }
 }

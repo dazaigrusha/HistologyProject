@@ -5,30 +5,25 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from PIL import Image, ImageTk, UnidentifiedImageError
-from histology.analysis import (add_measurements, apply_watershed, distance_image,
-                               label_image, marker_image, object_overlay, segment_nuclei)
+from histology.analysis import distance_image, label_image, marker_image
+from histology.texture import histogram_image
+from histology.texture_export import write_texture
+from histology.workflow import analyze_image, split_image, texture_image
 from histology.export import save_results
 from histology.image_io import load_image
 from histology.stains import separate_stains, transmittance_image
 
 
-def analyze_image(rgb: np.ndarray, h_map: np.ndarray, settings: dict, measurements: dict) -> dict:
-    """Виконати сегментацію й візуалізацію у фоновому потоці."""
-    result = add_measurements(segment_nuclei(h_map, settings), measurements)
-    result['overlay'] = object_overlay(rgb, result['labels'], result['objects'])
-    return result
-
-
-def split_image(rgb: np.ndarray, previous: dict, config: dict) -> dict:
-    """Обчислити Watershed і обидва накладання, не викликаючи Tkinter."""
-    result = apply_watershed(previous, config['segmentation'], config['watershed'], config['measurements'])
-    result['before_overlay'] = object_overlay(rgb, result['before_labels'], result['before_objects'])
-    result['overlay'] = object_overlay(rgb, result['labels'], result['objects'])
-    return result
+def save_texture_only(directory: Path, texture: dict) -> Path:
+    """Зберегти gray-LBP без необхідності запускати H&E."""
+    from tempfile import mkdtemp
+    destination = Path(mkdtemp(prefix='lbp_', dir=directory))
+    write_texture(destination, texture)
+    return destination
 
 
 class Application(tk.Tk):
-    """Вікно четвертої частини; усі звернення до Tkinter — в головному потоці."""
+    """Вікно п’ятої частини; усі звернення до Tkinter — в головному потоці."""
 
     def __init__(self, config: dict):
         super().__init__()
@@ -38,11 +33,13 @@ class Application(tk.Tk):
         self.channels = {}
         self.maps = None
         self.result = None
+        self.texture = None
         self.photos = []
+        self.views = {}
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.future = None
         self.job = None
-        self.title('Histology — аналіз зображень тканин | Частина 4')
+        self.title('Histology — аналіз зображень тканин | Частина 5')
         self.geometry('1140x850')
         toolbar = ttk.Frame(self, padding=12)
         toolbar.pack(fill='x')
@@ -54,14 +51,19 @@ class Application(tk.Tk):
         self.segment_button.pack(side='left')
         self.watershed_button = ttk.Button(toolbar, text='3. Watershed', command=self.run_watershed)
         self.watershed_button.pack(side='left', padx=8)
+        self.texture_button = ttk.Button(toolbar, text='4. Текстура LBP', command=self.run_texture)
+        self.texture_button.pack(side='left')
         self.save_button = ttk.Button(toolbar, text='Зберегти результати', command=self.save_channels)
         self.save_button.pack(side='left', padx=8)
         self.info = tk.StringVar(value='Вибери зображення тканини із забарвленням H&E.')
         ttk.Label(self, textvariable=self.info, padding=12, wraplength=1080).pack(fill='x')
         self.summary = tk.StringVar(value='Кандидатів: —')
         ttk.Label(self, textvariable=self.summary, padding=(12, 0)).pack(fill='x')
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill='both', expand=True, padx=12, pady=8)
+        self.view_selector = ttk.Combobox(self, state='readonly')
+        self.view_selector.pack(fill='x', padx=12, pady=4)
+        self.view_selector.bind('<<ComboboxSelected>>', lambda event: self.render_view())
+        self.preview = ttk.Label(self, anchor='center')
+        self.preview.pack(fill='both', expand=True, padx=12, pady=8)
         table_frame = ttk.Frame(self, padding=(12, 0))
         table_frame.pack(fill='x')
         columns = ('id', 'area_px', 'perimeter_px', 'circularity', 'centroid_x', 'centroid_y', 'touches_border')
@@ -90,14 +92,15 @@ class Application(tk.Tk):
                                 (self.run_button, idle and self.original is not None),
                                 (self.segment_button, idle and self.maps is not None),
                                 (self.watershed_button, idle and self.result is not None),
-                                (self.save_button, idle and self.maps is not None)):
+                                (self.texture_button, idle and self.original is not None
+                                 and (self.config_data['texture']['source'] == 'gray' or self.maps is not None)
+                                 and (self.config_data['texture']['scope'] == 'whole' or self.result is not None)),
+                                (self.save_button, idle and (self.maps is not None or self.texture is not None))):
             button.configure(state='normal' if enabled else 'disabled')
 
     def show_tabs(self):
         """Перебудувати вкладки з екранними копіями; оригінальні дані не змінювати."""
-        for tab in self.notebook.tabs():
-            self.notebook.nametowidget(tab).destroy()
-        self.photos = []
+        previous = self.view_selector.get()
         images = {'Оригінал': self.original, **self.channels}
         if self.result is not None:
             for title, key in (('Оцу', 'raw_mask'), ('Відкриття', 'opened_mask'), ('Відібрані', 'mask')):
@@ -110,15 +113,29 @@ class Application(tk.Tk):
                 images['Після WS'] = self.result['overlay']
             else:
                 images['Об’єкти'] = self.result['overlay']
-        for name, image in images.items():
-            preview = image.copy()
-            preview.thumbnail((self.config_data['preview_width'],
-                               self.config_data['preview_height']), Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(preview)
-            self.photos.append(photo)
-            frame = ttk.Frame(self.notebook)
-            ttk.Label(frame, image=photo, anchor='center').pack(fill='both', expand=True)
-            self.notebook.add(frame, text=name)
+        if self.texture is not None:
+            images['LBP — вхід'] = Image.fromarray(self.texture['source_image'])
+            images['LBP — коди'] = Image.fromarray(self.texture['codes'])
+            images['LBP — гістограма'] = histogram_image(self.texture['histogram_counts'])
+        self.views = images
+        self.view_selector.configure(values=list(images))
+        self.select_view(previous if previous in images else 'Оригінал')
+
+    def select_view(self, name):
+        """Вибрати результат зі списку без переповнення рядка вкладок."""
+        self.view_selector.set(name)
+        self.render_view()
+
+    def render_view(self):
+        """Масштабувати лише поточну картинку для екрана."""
+        if self.view_selector.get() not in self.views:
+            return
+        preview = self.views[self.view_selector.get()].copy()
+        preview.thumbnail((self.config_data['preview_width'], self.config_data['preview_height']),
+                          Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(preview)
+        self.photos = [photo]
+        self.preview.configure(image=photo)
 
     def show_objects(self):
         """Оновити лічильник і таблицю; ID відповідає labels.npy та objects.csv."""
@@ -156,7 +173,7 @@ class Application(tk.Tk):
         self.original = image
         self.source_path = Path(filename)
         self.channels = {}
-        self.maps = self.result = None
+        self.maps = self.result = self.texture = None
         self.show_tabs()
         self.show_objects()
         self.update_buttons()
@@ -192,6 +209,14 @@ class Application(tk.Tk):
         self.info.set('Карта відстаней → автоматичні маркери → Watershed…')
         self.start_job('watershed', split_image, np.asarray(self.original), self.result, self.config_data)
 
+    def run_texture(self):
+        """Розрахувати LBP для поточного джерела й актуальної сегментації."""
+        if self.original is None or self.future is not None:
+            return
+        self.info.set('Обчислення LBP та гістограм…')
+        self.start_job('texture', texture_image, np.asarray(self.original), self.maps,
+                       self.result, self.config_data['texture'])
+
     def check_result(self):
         """Забрати результат фонового обчислення в головному потоці."""
         if not self.future.done():
@@ -201,20 +226,31 @@ class Application(tk.Tk):
             result = self.future.result()
             if self.job == 'separate':
                 self.maps = result
-                self.result = None
+                self.result = self.texture = None
                 self.channels = {'H': Image.fromarray(transmittance_image(self.maps[0])),
                                  'E': Image.fromarray(transmittance_image(self.maps[1]))}
                 self.show_tabs()
                 self.show_objects()
-                self.notebook.select(1)
+                self.select_view('H')
                 self.info.set('H&E готово. Натисни «2. Знайти кандидатів».')
             elif self.job in ('segment', 'watershed'):
                 self.result = result
+                self.texture = None
                 self.show_tabs()
                 self.show_objects()
-                self.notebook.select(len(self.notebook.tabs()) - 1)
+                self.select_view(list(self.views)[-1])
                 self.info.set('Готово. Зелені межі й номери — відібрані кандидати. '
                               'Периметр сітковий; щільність обчислена на всю площу кадру.')
+            elif self.job == 'texture':
+                self.texture = result
+                self.texture['source_name'] = self.source_path.name
+                self.show_tabs()
+                self.select_view('LBP — гістограма')
+                features = result['features']
+                entropy = features['entropy_bits']
+                entropy_text = 'немає центрів' if entropy is None else f'{entropy:.3f} біт'
+                self.info.set(f"LBP: {features['valid_centers']} допустимих центрів | "
+                              f"Ентропія: {entropy_text}. Це опис текстури, не діагноз.")
             else:
                 self.info.set(f'Результати збережено: {result}')
         except Exception as error:  # Помилка worker має бути показана, а кнопки розблоковані.
@@ -228,11 +264,14 @@ class Application(tk.Tk):
 
     def save_channels(self):
         """Зберегти поточні канали та, якщо є, результати сегментації у фоні."""
-        if self.maps is None or self.future is not None:
+        if (self.maps is None and self.texture is None) or self.future is not None:
             return
         directory = filedialog.askdirectory(title='Вибери теку для результатів')
         if not directory:
             return
         self.info.set('Збереження результатів…')
-        self.start_job('save', save_results, Path(directory), self.source_path.name,
-                       self.original.size, self.maps, self.config_data, self.result)
+        if self.maps is None:
+            self.start_job('save', save_texture_only, Path(directory), self.texture)
+        else:
+            self.start_job('save', save_results, Path(directory), self.source_path.name,
+                           self.original.size, self.maps, self.config_data, self.result, self.texture)

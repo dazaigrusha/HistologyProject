@@ -8,6 +8,7 @@ from PIL import Image
 from histology.analysis import distance_image, label_image, marker_image
 from histology.measurements import measure_regions, summarize_regions
 from histology.stains import transmittance_image
+from histology.texture_export import write_texture
 
 OBJECT_FIELDS = ['id', 'area_px', 'x_min', 'y_min', 'x_max', 'y_max',
                  'centroid_x', 'centroid_y', 'touches_border', 'perimeter_px',
@@ -15,7 +16,7 @@ OBJECT_FIELDS = ['id', 'area_px', 'x_min', 'y_min', 'x_max', 'y_max',
                  'equivalent_diameter_um']
 
 
-def _write_objects(path: Path, objects: list) -> None:
+def write_objects(path: Path, objects: list) -> None:
     """Зберегти UTF-8 BOM CSV; порожній список усе одно має заголовок."""
     with path.open('w', newline='', encoding='utf-8-sig') as stream:
         writer = csv.DictWriter(stream, fieldnames=OBJECT_FIELDS)
@@ -24,7 +25,8 @@ def _write_objects(path: Path, objects: list) -> None:
 
 
 def save_results(directory: Path, source_name: str, size: tuple, maps: tuple,
-                 config: dict, result: dict | None = None) -> Path:
+                 config: dict, result: dict | None = None,
+                 texture: dict | None = None) -> Path:
     """Зберегти дані поточної стадії в нову теку, не перезаписуючи минулі запуски.
 
     Після помилки запису можливі часткові файли у створеній теці.
@@ -48,7 +50,7 @@ def save_results(directory: Path, source_name: str, size: tuple, maps: tuple,
         label_image(result['labels']).save(destination / 'labels.png')
         scale = config['measurements']['pixel_size_um']
         objects = measure_regions(result['labels'], scale)
-        _write_objects(destination / 'objects.csv', objects)
+        write_objects(destination / 'objects.csv', objects)
         summary = {'after': summarize_regions(objects, result['labels'].shape, scale)}
         metadata.update({'stage': result.get('stage', 'components'),
                          'segmentation': config['segmentation'],
@@ -64,7 +66,7 @@ def save_results(directory: Path, source_name: str, size: tuple, maps: tuple,
             distance_image(result['distance']).save(destination / 'distance.png')
             marker_image(result['distance'], result['markers']).save(destination / 'markers.png')
             result['before_overlay'].save(destination / 'before_overlay.png')
-            _write_objects(destination / 'objects_before.csv', result['before_objects'])
+            write_objects(destination / 'objects_before.csv', result['before_objects'])
             summary['before'] = result['before_summary']
             summary['markers'] = result['marker_count']
             summary['basins_before_filter'] = result['basin_count_before_filter']
@@ -73,6 +75,9 @@ def save_results(directory: Path, source_name: str, size: tuple, maps: tuple,
             metadata['watershed_partition'] = 'no zero-valued lines inside input foreground'
         (destination / 'summary.json').write_text(
             json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+    if texture is not None:
+        write_texture(destination, texture)
+        metadata['texture'] = texture['settings']
     (destination / 'parameters.json').write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     return destination
