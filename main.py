@@ -1,4 +1,4 @@
-"""Точка входу першої частини проєкту."""
+"""Точка входу навчального проєкту."""
 import argparse
 from pathlib import Path
 from histology.config import load_config

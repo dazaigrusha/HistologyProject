@@ -1,17 +1,25 @@
-"""Перегляд оригіналу, ручне розділення H&E та експорт каналів."""
+"""Інтерфейс H&E, сегментації, попереднього підрахунку та експорту."""
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-import json
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from PIL import Image, ImageTk, UnidentifiedImageError
+from histology.analysis import object_overlay, segment_nuclei
+from histology.export import save_results
 from histology.image_io import load_image
 from histology.stains import separate_stains, transmittance_image
 
 
+def analyze_image(rgb: np.ndarray, h_map: np.ndarray, settings: dict) -> dict:
+    """Виконати сегментацію й візуалізацію у фоновому потоці."""
+    result = segment_nuclei(h_map, settings)
+    result['overlay'] = object_overlay(rgb, result['labels'], result['objects'])
+    return result
+
+
 class Application(tk.Tk):
-    """Вікно другої частини; обчислення виконуються поза потоком інтерфейсу."""
+    """Вікно третьої частини; усі звернення до Tkinter — в головному потоці."""
 
     def __init__(self, config: dict):
         super().__init__()
@@ -20,40 +28,70 @@ class Application(tk.Tk):
         self.source_path = None
         self.channels = {}
         self.maps = None
+        self.result = None
         self.photos = []
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.future = None
-        self.title('Histology — аналіз зображень тканин | Частина 2')
-        self.geometry('1100x780')
+        self.job = None
+        self.title('Histology — аналіз зображень тканин | Частина 3')
+        self.geometry('1140x850')
         toolbar = ttk.Frame(self, padding=12)
         toolbar.pack(fill='x')
         self.open_button = ttk.Button(toolbar, text='Відкрити зображення', command=self.open_image)
         self.open_button.pack(side='left')
-        self.run_button = ttk.Button(toolbar, text='Розділити H&E', command=self.run_separation,
-                                     state='disabled')
+        self.run_button = ttk.Button(toolbar, text='1. Розділити H&E', command=self.run_separation)
         self.run_button.pack(side='left', padx=8)
-        self.save_button = ttk.Button(toolbar, text='Зберегти канали', command=self.save_channels,
-                                      state='disabled')
-        self.save_button.pack(side='left')
+        self.segment_button = ttk.Button(toolbar, text='2. Знайти кандидатів', command=self.run_segmentation)
+        self.segment_button.pack(side='left')
+        self.save_button = ttk.Button(toolbar, text='Зберегти результати', command=self.save_channels)
+        self.save_button.pack(side='left', padx=8)
         self.info = tk.StringVar(value='Вибери зображення тканини із забарвленням H&E.')
-        ttk.Label(self, textvariable=self.info, padding=12, wraplength=1040).pack(fill='x')
+        ttk.Label(self, textvariable=self.info, padding=12, wraplength=1080).pack(fill='x')
+        self.summary = tk.StringVar(value='Кандидатів: —')
+        ttk.Label(self, textvariable=self.summary, padding=(12, 0)).pack(fill='x')
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill='both', expand=True, padx=12, pady=8)
-        ttk.Label(self, text='H: гематоксилін | E: еозин. Темніші ділянки — більше барвника. '
-                  'Це ще не маска ядер.', padding=12).pack(fill='x')
+        table_frame = ttk.Frame(self, padding=(12, 0))
+        table_frame.pack(fill='x')
+        columns = ('id', 'area_px', 'centroid_x', 'centroid_y', 'touches_border')
+        self.table = ttk.Treeview(table_frame, columns=columns, show='headings', height=4)
+        for column, title in zip(columns, ('№', 'Площа, пікселі²', 'Центр X', 'Центр Y', 'На краю')):
+            self.table.heading(column, text=title)
+            self.table.column(column, width=150, anchor='center')
+        scrollbar = ttk.Scrollbar(table_frame, orient='vertical', command=self.table.yview)
+        self.table.configure(yscrollcommand=scrollbar.set)
+        self.table.pack(side='left', fill='x', expand=True)
+        scrollbar.pack(side='right', fill='y')
+        ttk.Label(self, text='Попередній підрахунок зв’язних областей. '
+                  'Ядра, що торкаються, поки можуть утворювати один об’єкт.', padding=12).pack(fill='x')
+        self.update_buttons()
         self.protocol('WM_DELETE_WINDOW', self.close)
 
     def close(self):
-        """Закрити вікно та звільнити виконавець фонових завдань."""
+        """Закрити вікно; активне числове завдання завершиться у фоні."""
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.destroy()
 
+    def update_buttons(self):
+        """Увімкнути лише дії, для яких уже підготовлено дані."""
+        idle = self.future is None
+        for button, enabled in ((self.open_button, idle),
+                                (self.run_button, idle and self.original is not None),
+                                (self.segment_button, idle and self.maps is not None),
+                                (self.save_button, idle and self.maps is not None)):
+            button.configure(state='normal' if enabled else 'disabled')
+
     def show_tabs(self):
-        """Показати копії для перегляду без зміни розміру вихідних даних."""
+        """Перебудувати вкладки з екранними копіями; оригінальні дані не змінювати."""
         for tab in self.notebook.tabs():
             self.notebook.nametowidget(tab).destroy()
         self.photos = []
-        for name, image in {'Оригінал': self.original, **self.channels}.items():
+        images = {'Оригінал': self.original, **self.channels}
+        if self.result is not None:
+            for title, key in (('Оцу', 'raw_mask'), ('Відкриття', 'opened_mask'), ('Відібрані', 'mask')):
+                images[title] = Image.fromarray(self.result[key].astype(np.uint8) * 255)
+            images['Об’єкти'] = self.result['overlay']
+        for name, image in images.items():
             preview = image.copy()
             preview.thumbnail((self.config_data['preview_width'],
                                self.config_data['preview_height']), Image.Resampling.LANCZOS)
@@ -63,8 +101,24 @@ class Application(tk.Tk):
             ttk.Label(frame, image=photo, anchor='center').pack(fill='both', expand=True)
             self.notebook.add(frame, text=name)
 
+    def show_objects(self):
+        """Оновити лічильник і таблицю; ID відповідає labels.npy та objects.csv."""
+        children = self.table.get_children()
+        if children:
+            self.table.delete(*children)
+        if self.result is None:
+            self.summary.set('Кандидатів: —')
+            return
+        for item in self.result['objects']:
+            self.table.insert('', 'end', values=(item['id'], item['area_px'],
+                              f"{item['centroid_x']:.1f}", f"{item['centroid_y']:.1f}",
+                              'так' if item['touches_border'] else 'ні'))
+        self.summary.set(f"Кандидатів: {self.result['count']} | Поріг Оцу: "
+                         f"{self.result['otsu_threshold']} | Застосований поріг: "
+                         f"{self.result['effective_threshold']}")
+
     def open_image(self):
-        """Відкрити файл; скинути старі канали тільки після успішного читання."""
+        """Відкрити файл; скинути старі результати після успішного читання."""
         filename = filedialog.askopenfilename(title='Вибери зображення тканини', filetypes=[
             ('Зображення', '*.png *.jpg *.jpeg *.bmp *.tif *.tiff'), ('Усі файли', '*.*')])
         if not filename:
@@ -78,71 +132,76 @@ class Application(tk.Tk):
         self.original = image
         self.source_path = Path(filename)
         self.channels = {}
-        self.maps = None
+        self.maps = self.result = None
         self.show_tabs()
-        self.run_button.configure(state='normal')
-        self.save_button.configure(state='disabled')
+        self.show_objects()
+        self.update_buttons()
         self.info.set(f'{self.source_path.name} | {image.width} × {image.height} пікселів | RGB. '
-                      'Для багатосторінкового TIFF відкрито перший кадр.')
+                      'Для TIFF відкрито перший кадр.')
 
-    def run_separation(self):
-        """Запустити розділення з оригіналу, не з екранної копії."""
-        if self.original is None or self.future is not None:
-            return
-        self.open_button.configure(state='disabled')
-        self.run_button.configure(state='disabled')
-        self.save_button.configure(state='disabled')
-        self.info.set('Виконується розділення H&E…')
-        self.future = self.executor.submit(separate_stains, np.asarray(self.original),
-                                           self.config_data['stains'])
+    def start_job(self, job: str, function, *args):
+        """Передати роботу виконавцю, заблокувати кнопки та запланувати перевірку."""
+        self.job = job
+        self.future = self.executor.submit(function, *args)
+        self.update_buttons()
         self.after(80, self.check_result)
 
+    def run_separation(self):
+        """Обчислити H/E з оригіналу, не з екранної копії."""
+        if self.original is None or self.future is not None:
+            return
+        self.info.set('Виконується розділення H&E…')
+        self.start_job('separate', separate_stains, np.asarray(self.original), self.config_data['stains'])
+
+    def run_segmentation(self):
+        """Запустити Оцу, очищення, відбір і підрахунок кандидатів."""
+        if self.maps is None or self.future is not None:
+            return
+        self.info.set('Оцу → відкриття → компоненти зв’язності…')
+        self.start_job('segment', analyze_image, np.asarray(self.original), self.maps[0],
+                       self.config_data['segmentation'])
+
     def check_result(self):
-        """Забрати результат у головному потоці; Tkinter не викликається з worker."""
+        """Забрати результат фонового обчислення в головному потоці."""
         if not self.future.done():
             self.after(80, self.check_result)
             return
         try:
-            self.maps = self.future.result()
-            self.channels = {
-                'H — гематоксилін': Image.fromarray(transmittance_image(self.maps[0])),
-                'E — еозин': Image.fromarray(transmittance_image(self.maps[1])),
-            }
-            self.show_tabs()
-            self.notebook.select(1)
-            self.info.set('Готово. Перемикай вкладки для порівняння. '
-                          'Підрахунок ядер буде додано в наступних частинах.')
-        except (ValueError, MemoryError) as error:
-            messagebox.showerror('Помилка розділення', str(error))
-            self.info.set('Не вдалося виконати розділення. Спробуй менше зображення.')
+            result = self.future.result()
+            if self.job == 'separate':
+                self.maps = result
+                self.result = None
+                self.channels = {'H': Image.fromarray(transmittance_image(self.maps[0])),
+                                 'E': Image.fromarray(transmittance_image(self.maps[1]))}
+                self.show_tabs()
+                self.show_objects()
+                self.notebook.select(1)
+                self.info.set('H&E готово. Натисни «2. Знайти кандидатів».')
+            elif self.job == 'segment':
+                self.result = result
+                self.show_tabs()
+                self.show_objects()
+                self.notebook.select(len(self.notebook.tabs()) - 1)
+                self.info.set('Готово. Зелені межі й номери — відібрані кандидати. '
+                              'Площа наведена у пікселях².')
+            else:
+                self.info.set(f'Результати збережено: {result}')
+        except Exception as error:  # Помилка worker має бути показана, а кнопки розблоковані.
+            messagebox.showerror('Помилка операції', str(error))
+            self.info.set('Операція не виконана. Для експорту можливі часткові файли. '
+                          'Спробуй менше зображення або перевір параметри.')
         finally:
             self.future = None
-            self.open_button.configure(state='normal')
-            self.run_button.configure(state='normal')
-            self.save_button.configure(state='normal' if self.maps is not None else 'disabled')
+            self.job = None
+            self.update_buttons()
 
     def save_channels(self):
-        """Зберегти PNG, вихідні float-карти NPY та параметри в нову теку запуску."""
-        if self.maps is None:
+        """Зберегти поточні канали та, якщо є, результати сегментації у фоні."""
+        if self.maps is None or self.future is not None:
             return
         directory = filedialog.askdirectory(title='Вибери теку для результатів')
         if not directory:
             return
-        # Унікальна тека запобігає перезапису попередніх запусків.
-        from tempfile import mkdtemp
-        try:
-            destination = Path(mkdtemp(prefix='he_', dir=directory))
-            for name, channel in zip(('hematoxylin', 'eosin'), self.maps):
-                Image.fromarray(transmittance_image(channel)).save(destination / f'{name}.png')
-                np.save(destination / f'{name}_od.npy', channel, allow_pickle=False)
-            metadata = {'source': self.source_path.name, 'size': list(self.original.size),
-                        'method': 'two_stain_od_least_squares_clipped',
-                        'stains': self.config_data['stains'],
-                        'png': 'uint8 transmittance: round(255*exp(-concentration))',
-                        'npy': 'float32 nonnegative concentration, original resolution'}
-            (destination / 'parameters.json').write_text(
-                json.dumps(metadata, ensure_ascii=False, indent=2), encoding='utf-8')
-        except (OSError, ValueError) as error:
-            messagebox.showerror('Помилка збереження', f'{error}\nМожливі часткові файли.')
-            return
-        self.info.set(f'Канали та параметри збережено: {destination}')
+        self.info.set('Збереження результатів…')
+        self.start_job('save', save_results, Path(directory), self.source_path.name,
+                       self.original.size, self.maps, self.config_data, self.result)

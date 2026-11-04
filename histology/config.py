@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from histology.stains import validate_stains
+from histology.segmentation import validate_segmentation
 
 
 def load_config(path: Path) -> dict:
@@ -14,4 +15,5 @@ def load_config(path: Path) -> dict:
         if type(value) is not int or value <= 0:
             raise ValueError(f'{name}: потрібне додатне ціле число.')
     validate_stains(config.get("stains"))
+    validate_segmentation(config.get("segmentation"))
     return config

@@ -15,5 +15,13 @@
     ],
     "white_level": 255,
     "block_rows": 128
+  },
+  "segmentation": {
+    "threshold_floor": 15,
+    "opening_radius": 1,
+    "min_area": 30,
+    "max_area": 0,
+    "connectivity": 8,
+    "exclude_border": false
   }
 }
