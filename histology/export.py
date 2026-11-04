@@ -9,6 +9,7 @@ from histology.analysis import distance_image, label_image, marker_image
 from histology.measurements import measure_regions, summarize_regions
 from histology.stains import transmittance_image
 from histology.texture_export import write_texture
+from histology.evaluation import write_evaluation
 
 OBJECT_FIELDS = ['id', 'area_px', 'x_min', 'y_min', 'x_max', 'y_max',
                  'centroid_x', 'centroid_y', 'touches_border', 'perimeter_px',
@@ -75,6 +76,8 @@ def save_results(directory: Path, source_name: str, size: tuple, maps: tuple,
             metadata['watershed_partition'] = 'no zero-valued lines inside input foreground'
         (destination / 'summary.json').write_text(
             json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+    if result is not None and result.get('evaluation') is not None:
+        write_evaluation(destination, result['evaluation'])
     if texture is not None:
         write_texture(destination, texture)
         metadata['texture'] = texture['settings']

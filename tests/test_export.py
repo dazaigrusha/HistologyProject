@@ -77,6 +77,22 @@ class ExportTests(unittest.TestCase):
                              'watershed_labels.npy', 'objects_before.csv', 'before_overlay.png'):
                 self.assertTrue((folder / filename).is_file())
 
+    def test_evaluation_is_exported_with_current_result(self):
+        from histology.metrics import evaluate_result
+        config = load_config(Path(__file__).resolve().parents[1] / 'config.json')
+        h_map = np.zeros((3, 3), dtype=np.float32)
+        result = segment_nuclei(h_map, config['segmentation'])
+        result['overlay'] = object_overlay(np.full((3, 3, 3), 255, dtype=np.uint8),
+                                           result['labels'], result['objects'])
+        with tempfile.TemporaryDirectory() as tmp:
+            truth = Path(tmp) / 'truth.npy'
+            np.save(truth, np.zeros((3, 3), dtype=np.int32))
+            result['evaluation'] = evaluate_result(result, truth, 100)
+            folder = save_results(Path(tmp), 'empty.png', (3, 3), (h_map, h_map), config, result)
+            evaluation = json.loads((folder / 'evaluation.json').read_text())
+            self.assertEqual(evaluation['rows'][0]['dice'], 1)
+            self.assertTrue((folder / 'evaluation.csv').is_file())
+
 
 if __name__ == '__main__':
     unittest.main()

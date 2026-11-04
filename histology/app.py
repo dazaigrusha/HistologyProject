@@ -8,6 +8,8 @@ from PIL import Image, ImageTk, UnidentifiedImageError
 from histology.analysis import distance_image, label_image, marker_image
 from histology.texture import histogram_image
 from histology.texture_export import write_texture
+from histology.metrics import evaluate_result
+from histology.batch import run_batch
 from histology.workflow import analyze_image, split_image, texture_image
 from histology.export import save_results
 from histology.image_io import load_image
@@ -23,7 +25,7 @@ def save_texture_only(directory: Path, texture: dict) -> Path:
 
 
 class Application(tk.Tk):
-    """Вікно п’ятої частини; усі звернення до Tkinter — в головному потоці."""
+    """Вікно шостої частини; усі звернення до Tkinter — в головному потоці."""
 
     def __init__(self, config: dict):
         super().__init__()
@@ -39,7 +41,7 @@ class Application(tk.Tk):
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.future = None
         self.job = None
-        self.title('Histology — аналіз зображень тканин | Частина 5')
+        self.title('Histology — аналіз зображень тканин | Частина 6')
         self.geometry('1140x850')
         toolbar = ttk.Frame(self, padding=12)
         toolbar.pack(fill='x')
@@ -55,11 +57,20 @@ class Application(tk.Tk):
         self.texture_button.pack(side='left')
         self.save_button = ttk.Button(toolbar, text='Зберегти результати', command=self.save_channels)
         self.save_button.pack(side='left', padx=8)
+        extra_toolbar = ttk.Frame(self, padding=(12, 0))
+        extra_toolbar.pack(fill='x')
+        self.evaluate_button = ttk.Button(extra_toolbar, text='Порівняти з еталоном', command=self.run_evaluation)
+        self.evaluate_button.pack(side='left')
+        self.batch_button = ttk.Button(extra_toolbar, text='Обробити вибірку CSV', command=self.run_batch)
+        self.batch_button.pack(side='left', padx=8)
+        self.metric_text = tk.StringVar(value='Метрики: еталон ще не вибрано.')
+        ttk.Label(extra_toolbar, textvariable=self.metric_text).pack(side='left', padx=8)
         self.info = tk.StringVar(value='Вибери зображення тканини із забарвленням H&E.')
         ttk.Label(self, textvariable=self.info, padding=12, wraplength=1080).pack(fill='x')
         self.summary = tk.StringVar(value='Кандидатів: —')
         ttk.Label(self, textvariable=self.summary, padding=(12, 0)).pack(fill='x')
-        self.view_selector = ttk.Combobox(self, state='readonly')
+        self.view_name = tk.StringVar()
+        self.view_selector = ttk.Combobox(self, state='readonly', textvariable=self.view_name)
         self.view_selector.pack(fill='x', padx=12, pady=4)
         self.view_selector.bind('<<ComboboxSelected>>', lambda event: self.render_view())
         self.preview = ttk.Label(self, anchor='center')
@@ -95,12 +106,14 @@ class Application(tk.Tk):
                                 (self.texture_button, idle and self.original is not None
                                  and (self.config_data['texture']['source'] == 'gray' or self.maps is not None)
                                  and (self.config_data['texture']['scope'] == 'whole' or self.result is not None)),
+                                (self.evaluate_button, idle and self.result is not None),
+                                (self.batch_button, idle),
                                 (self.save_button, idle and (self.maps is not None or self.texture is not None))):
             button.configure(state='normal' if enabled else 'disabled')
 
     def show_tabs(self):
         """Перебудувати вкладки з екранними копіями; оригінальні дані не змінювати."""
-        previous = self.view_selector.get()
+        previous = self.view_name.get()
         images = {'Оригінал': self.original, **self.channels}
         if self.result is not None:
             for title, key in (('Оцу', 'raw_mask'), ('Відкриття', 'opened_mask'), ('Відібрані', 'mask')):
@@ -122,15 +135,15 @@ class Application(tk.Tk):
         self.select_view(previous if previous in images else 'Оригінал')
 
     def select_view(self, name):
-        """Вибрати результат зі списку без переповнення рядка вкладок."""
-        self.view_selector.set(name)
+        """Вибрати результат у випадному списку."""
+        self.view_name.set(name)
         self.render_view()
 
     def render_view(self):
         """Масштабувати лише поточну картинку для екрана."""
-        if self.view_selector.get() not in self.views:
+        if self.view_name.get() not in self.views:
             return
-        preview = self.views[self.view_selector.get()].copy()
+        preview = self.views[self.view_name.get()].copy()
         preview.thumbnail((self.config_data['preview_width'], self.config_data['preview_height']),
                           Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(preview)
@@ -174,6 +187,7 @@ class Application(tk.Tk):
         self.source_path = Path(filename)
         self.channels = {}
         self.maps = self.result = self.texture = None
+        self.metric_text.set('Метрики: еталон ще не вибрано.')
         self.show_tabs()
         self.show_objects()
         self.update_buttons()
@@ -217,6 +231,31 @@ class Application(tk.Tk):
         self.start_job('texture', texture_image, np.asarray(self.original), self.maps,
                        self.result, self.config_data['texture'])
 
+    def run_evaluation(self):
+        """Вибрати еталон маски або instance-ID та порівняти поточний результат."""
+        if self.result is None or self.future is not None:
+            return
+        filename = filedialog.askopenfilename(title='Еталон: бінарне зображення або instance-ID NPY',
+            filetypes=[('Еталони', '*.png *.bmp *.tif *.tiff *.npy'), ('Усі файли', '*.*')])
+        if not filename:
+            return
+        self.info.set('Порівняння з еталоном…')
+        self.start_job('evaluation', evaluate_result, self.result, Path(filename), self.config_data['max_pixels'])
+
+    def run_batch(self):
+        """Вибрати опис вибірки й вихідну теку; виконати повний аналіз у фоні."""
+        if self.future is not None:
+            return
+        filename = filedialog.askopenfilename(title='CSV зі стовпцями image,reference',
+                                              filetypes=[('Вибірка CSV', '*.csv')])
+        if not filename:
+            return
+        directory = filedialog.askdirectory(title='Тека для пакетного звіту')
+        if not directory:
+            return
+        self.info.set('Пакетна обробка вибірки… Поточний відкритий кадр збережено у вікні.')
+        self.start_job('batch', run_batch, Path(filename), Path(directory), self.config_data)
+
     def check_result(self):
         """Забрати результат фонового обчислення в головному потоці."""
         if not self.future.done():
@@ -227,6 +266,7 @@ class Application(tk.Tk):
             if self.job == 'separate':
                 self.maps = result
                 self.result = self.texture = None
+                self.metric_text.set('Метрики: еталон ще не вибрано.')
                 self.channels = {'H': Image.fromarray(transmittance_image(self.maps[0])),
                                  'E': Image.fromarray(transmittance_image(self.maps[1]))}
                 self.show_tabs()
@@ -235,12 +275,20 @@ class Application(tk.Tk):
                 self.info.set('H&E готово. Натисни «2. Знайти кандидатів».')
             elif self.job in ('segment', 'watershed'):
                 self.result = result
+                self.metric_text.set('Метрики: потрібно порівняти новий результат з еталоном.')
                 self.texture = None
                 self.show_tabs()
                 self.show_objects()
                 self.select_view(list(self.views)[-1])
                 self.info.set('Готово. Зелені межі й номери — відібрані кандидати. '
                               'Периметр сітковий; щільність обчислена на всю площу кадру.')
+            elif self.job == 'evaluation':
+                self.result['evaluation'] = result
+                current = result['rows'][-1]
+                self.metric_text.set(f"Dice: {current['dice']:.3f} | IoU: {current['iou']:.3f}")
+                self.info.set('Порівняння готове. Збережи результати для CSV/JSON метрик.')
+            elif self.job == 'batch':
+                self.info.set(f'Пакетну обробку завершено: {result}. Перевір batch_status.csv.')
             elif self.job == 'texture':
                 self.texture = result
                 self.texture['source_name'] = self.source_path.name

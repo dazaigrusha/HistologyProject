@@ -1,0 +1,3 @@
+image,reference
+../data/images/sample01.png,../data/references/sample01.npy
+../data/images/sample02.png,

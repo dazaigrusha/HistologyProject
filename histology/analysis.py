@@ -70,6 +70,7 @@ def apply_watershed(previous: dict, segmentation: dict, watershed: dict,
     scale = measurements['pixel_size_um']
     labels, objects = filter_regions(split['watershed_labels'], segmentation, scale)
     result = previous.copy()
+    result.pop('evaluation', None)  # Після нової сегментації старі метрики неактуальні.
     before_labels = previous.get('before_labels', previous['labels'])
     before_objects = measure_regions(before_labels, scale)
     result.update(split)
